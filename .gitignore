@@ -3,3 +3,4 @@ goStatic*
 .codegraph/
 coverage.out
 coverage.html
+.DS_Store
