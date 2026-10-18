@@ -2,7 +2,10 @@ package main
 
 import (
 	"compress/gzip"
+	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -221,6 +224,174 @@ func TestHandleReqHTTPSPromotion(t *testing.T) {
 				t.Errorf("next handler served = %v, want %v", served, tt.wantHandlerCalls)
 			}
 		})
+	}
+}
+
+func TestHandleIP(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		headers    map[string]string
+		want       string
+	}{
+		{name: "IPv4", remoteAddr: "192.0.2.1:12345", want: "192.0.2.1"},
+		{name: "IPv6", remoteAddr: "[2001:db8::1]:12345", want: "2001:db8::1"},
+		{name: "X-Forwarded-For", remoteAddr: "192.0.2.1:12345", headers: map[string]string{"X-Forwarded-For": "198.51.100.2, 192.0.2.10"}, want: "198.51.100.2"},
+		{name: "X-Real-IP", remoteAddr: "192.0.2.1:12345", headers: map[string]string{"X-Real-IP": "198.51.100.3"}, want: "198.51.100.3"},
+		{name: "Forwarded", remoteAddr: "192.0.2.1:12345", headers: map[string]string{"Forwarded": `for="[2001:db8::2]:1234";proto=https`}, want: "2001:db8::2"},
+		{name: "invalid forwarded header falls back to observed address", remoteAddr: "192.0.2.1:12345", headers: map[string]string{"X-Forwarded-For": "not-an-ip"}, want: "192.0.2.1"},
+		{name: "X-Forwarded-For takes precedence", remoteAddr: "192.0.2.1:12345", headers: map[string]string{"X-Forwarded-For": "198.51.100.2", "X-Real-IP": "198.51.100.3"}, want: "198.51.100.2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/ip", nil)
+			req.RemoteAddr = tt.remoteAddr
+			for name, value := range tt.headers {
+				req.Header.Set(name, value)
+			}
+			rec := httptest.NewRecorder()
+
+			handleIP(rec, req)
+
+			if got := rec.Body.String(); got != tt.want {
+				t.Errorf("body = %q, want %q", got, tt.want)
+			}
+			if got := rec.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+				t.Errorf("Content-Type = %q, want %q", got, "text/plain; charset=utf-8")
+			}
+		})
+	}
+}
+
+func TestHandleDNS(t *testing.T) {
+	tests := []struct {
+		name        string
+		remoteAddr  string
+		headers     map[string]string
+		lookupIPs   string
+		lookupNames []string
+		lookupErr   error
+		wantStatus  int
+		wantBody    string
+	}{
+		{
+			name:        "returns PTR record for client IP",
+			remoteAddr:  "192.0.2.1:12345",
+			lookupIPs:   "192.0.2.1",
+			lookupNames: []string{"ptr.example."},
+			wantStatus:  http.StatusOK,
+			wantBody:    "ptr.example.",
+		},
+		{
+			name:        "uses forwarded client IP",
+			remoteAddr:  "192.0.2.1:12345",
+			headers:     map[string]string{"X-Forwarded-For": "198.51.100.2, 192.0.2.10"},
+			lookupIPs:   "198.51.100.2",
+			lookupNames: []string{"forwarded.example."},
+			wantStatus:  http.StatusOK,
+			wantBody:    "forwarded.example.",
+		},
+		{
+			name:       "returns not found when PTR record is absent",
+			remoteAddr: "192.0.2.1:12345",
+			lookupIPs:  "192.0.2.1",
+			lookupErr:  &net.DNSError{IsNotFound: true},
+			wantStatus: http.StatusNotFound,
+			wantBody:   "PTR record not found\n",
+		},
+		{
+			name:       "returns bad gateway when DNS lookup fails",
+			remoteAddr: "192.0.2.1:12345",
+			lookupIPs:  "192.0.2.1",
+			lookupErr:  errors.New("resolver unavailable"),
+			wantStatus: http.StatusBadGateway,
+			wantBody:   "PTR lookup failed\n",
+		},
+		{
+			name:       "rejects invalid client address",
+			remoteAddr: "not-an-ip",
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "Unable to determine client IP\n",
+		},
+		{
+			name:        "returns not found for an empty lookup result",
+			remoteAddr:  "192.0.2.1:12345",
+			lookupIPs:   "192.0.2.1",
+			lookupNames: []string{},
+			wantStatus:  http.StatusNotFound,
+			wantBody:    "PTR record not found\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/dns", nil)
+			req.RemoteAddr = tt.remoteAddr
+			for name, value := range tt.headers {
+				req.Header.Set(name, value)
+			}
+			rec := httptest.NewRecorder()
+			lookupCalled := false
+
+			handleDNSWithLookup(rec, req, func(ip string) ([]string, error) {
+				lookupCalled = true
+				if ip != tt.lookupIPs {
+					t.Errorf("lookup IP = %q, want %q", ip, tt.lookupIPs)
+				}
+				return tt.lookupNames, tt.lookupErr
+			})
+
+			if got := rec.Code; got != tt.wantStatus {
+				t.Errorf("status = %d, want %d", got, tt.wantStatus)
+			}
+			if got := rec.Body.String(); got != tt.wantBody {
+				t.Errorf("body = %q, want %q", got, tt.wantBody)
+			}
+			if got := rec.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+				t.Errorf("Content-Type = %q, want %q", got, "text/plain; charset=utf-8")
+			}
+			if lookupCalled != (tt.lookupIPs != "") {
+				t.Errorf("lookup called = %v, want %v", lookupCalled, tt.lookupIPs != "")
+			}
+		})
+	}
+}
+
+func TestHandleJSON(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/json", nil)
+	req.RemoteAddr = "192.0.2.1:12345"
+	req.Header.Set("X-Forwarded-For", "198.51.100.2, 192.0.2.10")
+	rec := httptest.NewRecorder()
+
+	dnsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleDNSWithLookup(w, r, func(ip string) ([]string, error) {
+			if ip != "198.51.100.2" {
+				t.Errorf("lookup IP = %q, want %q", ip, "198.51.100.2")
+			}
+			return []string{"ptr.example."}, nil
+		})
+	})
+	handleJSONWithHandlers(rec, req, dnsHandler, handleIP)
+
+	if got := rec.Code; got != http.StatusOK {
+		t.Fatalf("status = %d, want %d", got, http.StatusOK)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want %q", got, "application/json")
+	}
+	var got []string
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	want := []string{"ptr.example.", "198.51.100.2"}
+	if len(got) != len(want) {
+		t.Fatalf("response array length = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("response[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

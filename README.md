@@ -77,6 +77,11 @@ Usage of ./goStatic:
         Define the basic auth. Form must be user:password
 ```
 
+The `/ip` endpoint returns the requesting client's IP address as plain text.
+The `/dns` endpoint performs a reverse DNS lookup for that same address and
+returns the first PTR record as plain text. The `/json` endpoint returns a
+JSON array containing the `/dns` response followed by the `/ip` response.
+
 ### Fallback
 
 The fallback option is principally useful for single-page applications (SPAs) where the browser may request a file, but where part of the path is in fact an internal route in the application, not a file on disk. goStatic supports two possible usages of this option:

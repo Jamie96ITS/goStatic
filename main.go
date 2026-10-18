@@ -5,10 +5,14 @@ package main
 
 import (
 	"compress/gzip"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path"
 	"strconv"
@@ -138,6 +142,112 @@ func handleReq(h http.Handler) http.Handler {
 	})
 }
 
+func handleIP(w http.ResponseWriter, r *http.Request) {
+	clientIP := requestClientIP(r)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprint(w, clientIP)
+}
+
+func requestClientIP(r *http.Request) string {
+	clientIP := forwardedIP(r.Header.Get("X-Forwarded-For"))
+	if clientIP == "" {
+		clientIP = forwardedIP(r.Header.Get("X-Real-IP"))
+	}
+	if clientIP == "" {
+		clientIP = forwardedFieldIP(r.Header.Get("Forwarded"))
+	}
+	if clientIP == "" {
+		clientIP = parseIPAddress(r.RemoteAddr)
+	}
+	if clientIP == "" {
+		clientIP = r.RemoteAddr
+	}
+	return clientIP
+}
+
+func handleDNS(w http.ResponseWriter, r *http.Request) {
+	handleDNSWithLookup(w, r, net.LookupAddr)
+}
+
+func handleDNSWithLookup(w http.ResponseWriter, r *http.Request, lookupAddr func(string) ([]string, error)) {
+	clientIP := parseIPAddress(requestClientIP(r))
+	if clientIP == "" {
+		http.Error(w, "Unable to determine client IP", http.StatusBadRequest)
+		return
+	}
+
+	names, err := lookupAddr(clientIP)
+	if err != nil {
+		log.Error().Err(err).Str("ip", clientIP).Msg("PTR lookup failed")
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			http.Error(w, "PTR record not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "PTR lookup failed", http.StatusBadGateway)
+		return
+	}
+	if len(names) == 0 {
+		http.Error(w, "PTR record not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprint(w, names[0])
+}
+
+func handleJSON(w http.ResponseWriter, r *http.Request) {
+	handleJSONWithHandlers(w, r, handleDNS, handleIP)
+}
+
+func handleJSONWithHandlers(w http.ResponseWriter, r *http.Request, dnsHandler, ipHandler http.HandlerFunc) {
+	dnsResponse := httptest.NewRecorder()
+	dnsHandler(dnsResponse, r)
+
+	ipResponse := httptest.NewRecorder()
+	ipHandler(ipResponse, r)
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode([]string{dnsResponse.Body.String(), ipResponse.Body.String()}); err != nil {
+		log.Error().Err(err).Msg("Failed to encode JSON response")
+	}
+}
+
+func forwardedIP(value string) string {
+	first := strings.SplitN(value, ",", 2)[0]
+	return parseIPAddress(first)
+}
+
+func forwardedFieldIP(value string) string {
+	first := strings.SplitN(value, ",", 2)[0]
+	for _, parameter := range strings.Split(first, ";") {
+		name, address, found := strings.Cut(strings.TrimSpace(parameter), "=")
+		if found && strings.EqualFold(name, "for") {
+			return parseIPAddress(address)
+		}
+	}
+	return ""
+}
+
+func parseIPAddress(value string) string {
+	value = strings.TrimSpace(strings.Trim(value, `"`))
+	if ip := net.ParseIP(value); ip != nil {
+		return ip.String()
+	}
+	if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
+		value = strings.TrimSuffix(strings.TrimPrefix(value, "["), "]")
+		if ip := net.ParseIP(value); ip != nil {
+			return ip.String()
+		}
+	}
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			return ip.String()
+		}
+	}
+	return ""
+}
+
 func main() {
 
 	flag.Parse()
@@ -241,6 +351,9 @@ func main() {
 			fmt.Fprintf(w, "Ok")
 		})
 	}
+	http.HandleFunc("/ip", handleIP)
+	http.HandleFunc("/dns", handleDNS)
+	http.HandleFunc("/json", handleJSON)
 
 	http.Handle(pathPrefix, handler)
 
