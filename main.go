@@ -144,6 +144,7 @@ func handleReq(h http.Handler) http.Handler {
 
 func handleIP(w http.ResponseWriter, r *http.Request) {
 	clientIP := requestClientIP(r)
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprint(w, clientIP)
 }
@@ -192,6 +193,7 @@ func handleDNSWithLookup(w http.ResponseWriter, r *http.Request, lookupAddr func
 		return
 	}
 
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprint(w, names[0])
 }
@@ -207,6 +209,7 @@ func handleJSONWithHandlers(w http.ResponseWriter, r *http.Request, dnsHandler, 
 	ipResponse := httptest.NewRecorder()
 	ipHandler(ipResponse, r)
 
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode([]string{dnsResponse.Body.String(), ipResponse.Body.String()}); err != nil {
 		log.Error().Err(err).Msg("Failed to encode JSON response")
