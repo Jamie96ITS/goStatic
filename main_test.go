@@ -380,17 +380,20 @@ func TestHandleJSON(t *testing.T) {
 	if got := rec.Header().Get("Content-Type"); got != "application/json" {
 		t.Errorf("Content-Type = %q, want %q", got, "application/json")
 	}
-	var got []string
+	var got map[string]string
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("response is not valid JSON: %v", err)
 	}
-	want := []string{"ptr.example.", "198.51.100.2"}
-	if len(got) != len(want) {
-		t.Fatalf("response array length = %d, want %d", len(got), len(want))
+	want := map[string]string{
+		"dns": "ptr.example.",
+		"ip":  "198.51.100.2",
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("response[%d] = %q, want %q", i, got[i], want[i])
+	if len(got) != len(want) {
+		t.Fatalf("response object has %d items, want %d", len(got), len(want))
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("response[%q] = %q, want %q", key, got[key], value)
 		}
 	}
 }

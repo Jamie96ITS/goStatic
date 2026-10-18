@@ -78,9 +78,12 @@ Usage of ./goStatic:
 ```
 
 The `/ip` endpoint returns the requesting client's IP address as plain text.
+
 The `/dns` endpoint performs a reverse DNS lookup for that same address and
-returns the first PTR record as plain text. The `/json` endpoint returns a
-JSON array containing the `/dns` response followed by the `/ip` response.
+returns the first PTR record as plain text. 
+
+The `/json` endpoint returns a JSON object with `dns` and `ip` keys containing the corresponding endpoint
+responses.
 
 ### Fallback
 

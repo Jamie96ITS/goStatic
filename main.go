@@ -211,7 +211,10 @@ func handleJSONWithHandlers(w http.ResponseWriter, r *http.Request, dnsHandler, 
 
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode([]string{dnsResponse.Body.String(), ipResponse.Body.String()}); err != nil {
+	if err := json.NewEncoder(w).Encode(map[string]string{
+		"dns": dnsResponse.Body.String(),
+		"ip":  ipResponse.Body.String(),
+	}); err != nil {
 		log.Error().Err(err).Msg("Failed to encode JSON response")
 	}
 }
